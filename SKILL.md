@@ -40,7 +40,8 @@ ga4-investigations/{domain}/
 ║  • CVR Formula: transactions / users (NOT sessions)                    ║
 ║  • Statistical Tests: Two-proportion Z-test (CVR), Z-test means (AOV)  ║
 ║  • Significance Level: α = 0.05                                        ║
-║  • GA4 API Limit: ALWAYS set limit: 50000                              ║
+║  • GA4 API Limit: ALWAYS set limit: 100000                             ║
+║  • Pagination: Use offset if row_count == limit                        ║
 ╚════════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -101,10 +102,38 @@ mcp__analytics-mcp__run_report:
       in_list_filter:
         values: ["{treatment}", "{control}"]
         case_sensitive: true
-  limit: 50000  # ⛔ MANDATORY!
+  limit: 100000  # ⛔ MANDATORY!
 ```
 
 **IMMEDIATELY save** the full response to `{date_folder}/transactions_raw.json`
+
+#### Step 3a: Check for Pagination & Sampling
+
+After receiving the response, check:
+
+```python
+# Check row count vs limit
+returned_rows = len(response.get('result', response).get('rows', []))
+row_count = response.get('result', response).get('row_count', returned_rows)
+
+# If row_count equals limit, there may be more data - use pagination
+if returned_rows >= 100000:
+    print("⚠️ Row count equals limit - pagination required!")
+    # Query again with offset: 100000, then offset: 200000, etc.
+    # Merge all results before saving to transactions_raw.json
+
+# Check for sampling
+metadata = response.get('result', response).get('metadata', {})
+sampling = metadata.get('sampling_metadatas', [])
+if sampling:
+    samples_read = sampling[0].get('samples_read_count', 0)
+    sampling_space = sampling[0].get('sampling_space_size', 0)
+    pct = (int(samples_read) / int(sampling_space) * 100) if sampling_space else 100
+    print(f"⛔ DATA IS SAMPLED: {pct:.1f}% of events analyzed")
+    # Consider using shorter date ranges to avoid sampling
+```
+
+**If pagination needed:** Query with `offset: 100000`, then `offset: 200000`, etc., until fewer than `limit` rows return. Merge all responses before saving.
 
 ### Step 4: Run Deterministic Script
 
@@ -155,21 +184,42 @@ Glob: ga4-investigations/{domain}/{date_folder}/charts/*.png            → Shou
 
 **If ANY file is missing → GO BACK and fix it. Do not proceed.**
 
-### B. Data Truncation Check
+### B. Data Truncation & Sampling Check
 
 ```python
 # Run this check:
 import json
 with open('transactions_raw.json') as f:
     data = json.load(f)
-    rows = data.get('result', data).get('rows', [])
-    print(f"Row count: {len(rows)}")
-    if len(rows) == 10000:
-        print("⛔ TRUNCATED! Re-query with limit: 50000")
+    result = data.get('result', data)
+    rows = result.get('rows', [])
+    row_count = len(rows)
+
+    # Check for truncation
+    print(f"Row count: {row_count}")
+    if row_count == 10000:
+        print("⛔ TRUNCATED at default limit! Re-query with limit: 100000")
+    elif row_count == 50000:
+        print("⛔ TRUNCATED at 50k! Re-query with limit: 100000")
+    elif row_count >= 100000:
+        print("⛔ MAY BE TRUNCATED! Use pagination with offset parameter")
+
+    # Check for sampling
+    metadata = result.get('metadata', {})
+    sampling = metadata.get('sampling_metadatas', [])
+    if sampling:
+        reads = int(sampling[0].get('samples_read_count', 0))
+        space = int(sampling[0].get('sampling_space_size', 0))
+        pct = (reads / space * 100) if space else 100
+        print(f"⛔ DATA SAMPLED: Only {pct:.1f}% of events analyzed!")
+        print("   → Use shorter date range or split into daily queries")
+    else:
+        print("✅ No sampling detected")
 ```
 
-- Row count == 10,000 → **DATA TRUNCATED, INVALID RESULTS**
-- Must re-query with `limit: 50000`
+- Row count == 10,000 → **DEFAULT LIMIT HIT, INVALID RESULTS**
+- Row count == 50,000 or 100,000 → **MAY BE TRUNCATED, use pagination**
+- `sampling_metadatas` present → **DATA IS SAMPLED, consider daily queries**
 
 ### C. Methodology Compliance
 
@@ -270,9 +320,73 @@ Always verify dimension name. Common mistake: `customUser:ab_test` vs `customUse
 ## Key Rules
 
 1. **Save data files** - transactions_raw.json MUST exist before reporting
-2. **ALWAYS use limit: 50000** - GA4 default truncates at 10,000
-3. **CVR = transactions/users** - never sessions
-4. **Run the script** - don't manually calculate metrics
-5. **Validate before reporting** - complete the checklist
-6. **Control first, Treatment second** - in all tables
-7. **No recommendations** - explain what happened, not what to do
+2. **ALWAYS use limit: 100000** - GA4 default truncates at 10,000
+3. **Check for pagination** - if row_count == limit, use `offset` to get more rows
+4. **Check for sampling** - look for `sampling_metadatas` in response
+5. **CVR = transactions/users** - never sessions
+6. **Run the script** - don't manually calculate metrics
+7. **Validate before reporting** - complete the checklist
+8. **Control first, Treatment second** - in all tables
+9. **No recommendations** - explain what happened, not what to do
+
+---
+
+## Domain-Specific: 4home.cz
+
+4home.cz requires **PostMAMA** (margin) metric tracking in addition to standard metrics.
+
+### 4home.cz Configuration
+
+```yaml
+domain: 4home.cz
+property_id: 282336364
+ab_test_dimension: "customUser:user_experiment_group"
+treatment_group: "1"
+control_group: "0"
+```
+
+### 4home.cz Workflow
+
+**Step 3 Query (DIFFERENT - includes PostMAMA):**
+
+```yaml
+mcp__analytics-mcp__run_report:
+  property_id: 282336364
+  date_ranges: [{"start_date": "{start}", "end_date": "{end}"}]
+  dimensions: ["customUser:user_experiment_group", "transactionId", "date"]
+  metrics: ["purchaseRevenue", "customEvent:post_mama"]  # BOTH METRICS!
+  dimension_filter:
+    filter:
+      field_name: "customUser:user_experiment_group"
+      in_list_filter:
+        values: ["1", "0"]
+        case_sensitive: true
+  limit: 100000
+```
+
+**Step 4 Script (DIFFERENT - use 4home-specific script):**
+
+```bash
+python ~/.claude/skills/ga4-ab-test-evaluator/scripts/run_4home_evaluation.py \
+  --start-date {start_date} \
+  --end-date {end_date} \
+  --users-treatment {users_treatment} \
+  --users-control {users_control} \
+  --sessions-treatment {sessions_treatment} \
+  --sessions-control {sessions_control} \
+  --output-dir {cwd}/ga4-investigations/4home.cz/{date_folder}/
+```
+
+### 4home.cz Report Template
+
+Include PostMAMA in the results table:
+
+```markdown
+| Metric | Control (0) | LuigisBox (1) | Diff | p-value | Status |
+|--------|-------------|---------------|------|---------|--------|
+| **User CVR** | X% | Y% | +Z% | 0.XXX | ... |
+| Session CVR | X% | Y% | +Z% | 0.XXX | ... |
+| AOV | X | Y | +Z% | 0.XXX | ... |
+| **PostMAMA** | X | Y | +Z% | 0.XXX | ... |
+| PostMAMA/User | X | Y | +Z% | - | - |
+```

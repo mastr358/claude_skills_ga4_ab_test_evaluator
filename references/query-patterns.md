@@ -11,23 +11,47 @@ GA4 Data API query structures for AB test analysis.
 5. [Outlier Removal](#outlier-removal)
 6. [Methodology Documentation](#methodology-documentation)
 
-## CRITICAL: API Limit
+## CRITICAL: API Limit & Pagination
 
 ```
 ╔════════════════════════════════════════════════════════════════════════╗
-║  ⛔ MANDATORY FOR ALL QUERIES: limit: 50000                             ║
+║  ⛔ MANDATORY FOR ALL QUERIES: limit: 100000                            ║
 ║                                                                        ║
 ║  GA4 DEFAULT LIMIT IS 10,000 ROWS - This WILL truncate your data!     ║
+║  GA4 MAXIMUM LIMIT IS 250,000 ROWS per request.                       ║
 ║                                                                        ║
 ║  EVERY mcp__analytics-mcp__run_report call MUST include:               ║
-║    limit: 50000                                                        ║
+║    limit: 100000                                                       ║
 ║                                                                        ║
-║  AFTER EVERY API call, immediately check row_count:                    ║
-║  - If row_count == 10000 → DATA TRUNCATED! Limit was not applied!      ║
-║  - If row_count == limit → DATA MAY BE TRUNCATED! Increase limit.      ║
+║  AFTER EVERY API call, immediately check:                              ║
+║  - If row_count == 10000 → FORGOT LIMIT! Re-query with limit: 100000   ║
+║  - If row_count == limit → USE PAGINATION! Query with offset parameter ║
+║  - Check for sampling_metadatas in response                            ║
 ║                                                                        ║
 ║  This is the #1 cause of irreproducible results.                       ║
 ╚════════════════════════════════════════════════════════════════════════╝
+```
+
+### Pagination Pattern
+
+If row_count equals limit, use offset-based pagination:
+
+```yaml
+# First request (offset defaults to 0)
+mcp__analytics-mcp__run_report:
+  property_id: 281685462
+  ...
+  limit: 100000
+
+# If 100,000 rows returned, fetch next page:
+mcp__analytics-mcp__run_report:
+  property_id: 281685462
+  ...
+  limit: 100000
+  offset: 100000  # Start from row 100,001
+
+# Continue until returned rows < limit
+# Merge all responses before processing
 ```
 
 **Example correct API call:**
@@ -37,7 +61,7 @@ mcp__analytics-mcp__run_report:
   date_ranges: [{"start_date": "2025-12-15", "end_date": "2026-01-04"}]
   dimensions: ["customUser:ab_test", "transactionId"]
   metrics: ["purchaseRevenue"]
-  limit: 50000  # ← MANDATORY - DO NOT OMIT
+  limit: 100000  # ← MANDATORY - DO NOT OMIT
 ```
 
 ## Avoiding Sampling
@@ -48,6 +72,30 @@ mcp__analytics-mcp__run_report:
 - Sum the daily values afterward
 - Duplicate counts (users active multiple days) are acceptable
 - Exception: Individual transaction queries (already granular)
+
+### Detecting Sampling in API Response
+
+GA4 adds `sampling_metadatas` to the response when sampling occurs:
+
+```python
+# Check for sampling in API response
+metadata = response.get('result', response).get('metadata', {})
+sampling = metadata.get('sampling_metadatas', [])
+
+if sampling:
+    samples_read = int(sampling[0].get('samples_read_count', 0))
+    sampling_space = int(sampling[0].get('sampling_space_size', 0))
+    percentage = (samples_read / sampling_space * 100) if sampling_space else 100
+    print(f"⛔ DATA SAMPLED: {percentage:.1f}% of {sampling_space:,} events analyzed")
+    # Solution: Use shorter date ranges or query daily and aggregate
+else:
+    print("✅ No sampling - full data coverage")
+```
+
+**If sampling detected:**
+1. Split the date range into smaller chunks (weekly or daily)
+2. Query each chunk separately
+3. Aggregate results after collection
 
 ## Core Metric Queries
 

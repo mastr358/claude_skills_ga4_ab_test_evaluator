@@ -37,7 +37,7 @@ REQUIRED GA4 QUERY (LLM must run this EXACTLY):
           in_list_filter:
             values: ["{treatment}", "{control}"]
             case_sensitive: true
-      limit: 50000
+      limit: 100000
 
 HARDCODED METHODOLOGY:
     - Outlier removal: 99th percentile (NOT IQR, NOT mean+3std)
@@ -350,14 +350,24 @@ def write_api_calls_log(
         "note": "Derived from user/session counts input to run_full_evaluation.py",
     })
 
+    # Determine truncation status
+    if total_rows == 10000:
+        truncation_status = "TRUNCATED_DEFAULT_LIMIT"
+    elif total_rows == 50000:
+        truncation_status = "POSSIBLY_TRUNCATED_50K"
+    elif total_rows >= 100000:
+        truncation_status = "TRUNCATED_NEEDS_PAGINATION"
+    else:
+        truncation_status = "OK"
+
     append_api_call_entry(log_path, {
         **base,
         "call": "run_report (transactions)",
         "dimensions": [ab_test_dimension, "transactionId"],
         "metrics": ["purchaseRevenue"],
-        "limit_requested": 50000,
+        "limit_requested": 100000,
         "row_count": total_rows,
-        "truncation_check": "TRUNCATED" if total_rows == 10000 else "OK",
+        "truncation_check": truncation_status,
     })
 
 
@@ -379,18 +389,52 @@ def load_and_validate_raw_data(
     rows = data.get('result', data).get('rows', [])
     total_rows = len(rows)
 
-    # CRITICAL: Check for truncation
+    # CRITICAL: Check for truncation at various limit thresholds
     if total_rows == 10000:
         print("=" * 70)
-        print("⛔ CRITICAL ERROR: DATA TRUNCATED!")
+        print("⛔ CRITICAL ERROR: DATA TRUNCATED AT DEFAULT LIMIT!")
         print("=" * 70)
-        print(f"Row count is exactly 10,000 - this means the GA4 API limit was hit.")
-        print(f"The LLM forgot to set 'limit: 50000' in the API call.")
-        print(f"Results will be INVALID - missing approximately 30% of transactions.")
+        print(f"Row count is exactly 10,000 - GA4 default limit was hit.")
+        print(f"The LLM forgot to set 'limit: 100000' in the API call.")
+        print(f"Results will be INVALID - missing transactions.")
         print()
-        print("REQUIRED ACTION: Re-run the GA4 query with 'limit: 50000'")
+        print("REQUIRED ACTION: Re-run the GA4 query with 'limit: 100000'")
         print("=" * 70)
         sys.exit(1)
+
+    if total_rows == 50000:
+        print("=" * 70)
+        print("⚠️ WARNING: DATA MAY BE TRUNCATED AT 50,000 ROWS!")
+        print("=" * 70)
+        print(f"Row count is exactly 50,000 - old limit may have been hit.")
+        print(f"Consider re-running with 'limit: 100000' or using pagination.")
+        print("=" * 70)
+        # Continue but warn - may be coincidence
+
+    if total_rows >= 100000:
+        print("=" * 70)
+        print("⛔ CRITICAL: ROW COUNT >= 100,000 - PAGINATION REQUIRED!")
+        print("=" * 70)
+        print(f"Row count is {total_rows:,} - limit was likely hit.")
+        print(f"Use pagination: query with offset: 100000, then offset: 200000, etc.")
+        print(f"Merge all responses before saving to transactions_raw.json")
+        print("=" * 70)
+        sys.exit(1)
+
+    # Check for sampling metadata
+    result = data.get('result', data)
+    metadata = result.get('metadata', {})
+    sampling = metadata.get('sampling_metadatas', [])
+    if sampling:
+        samples_read = int(sampling[0].get('samples_read_count', 0))
+        sampling_space = int(sampling[0].get('sampling_space_size', 0))
+        pct = (samples_read / sampling_space * 100) if sampling_space else 100
+        print("=" * 70)
+        print(f"⚠️ WARNING: DATA IS SAMPLED - {pct:.1f}% of events analyzed!")
+        print("=" * 70)
+        print(f"Only {samples_read:,} of {sampling_space:,} events were analyzed.")
+        print(f"Consider using shorter date ranges to avoid sampling.")
+        print("=" * 70)
 
     if total_rows < MIN_EXPECTED_ROWS:
         print(f"⚠️ WARNING: Only {total_rows} rows found. Verify this is expected for the domain.")
@@ -949,7 +993,7 @@ Use this table to verify the data matches what you see in Google Analytics:
 
 ### Row Count Check
 - **Total rows from GA4:** {total_rows:,}
-- **Truncation check:** {"✅ PASSED" if total_rows != 10000 else "⛔ FAILED - DATA TRUNCATED"}
+- **Truncation check:** {"⛔ FAILED - DEFAULT LIMIT HIT" if total_rows == 10000 else "⚠️ POSSIBLY TRUNCATED AT 50K" if total_rows == 50000 else "⛔ NEEDS PAGINATION" if total_rows >= 100000 else "✅ PASSED"}
 
 ### User Split
 {user_split_table}
@@ -2159,7 +2203,7 @@ def main():
         print(f"        in_list_filter:")
         print(f"          values: [\"{args.treatment}\", \"{args.control}\"]")
         print(f"          case_sensitive: true")
-        print(f"    limit: 50000")
+        print(f"    limit: 100000")
         print()
         print(f"Save the FULL response to: {raw_file}")
         print("=" * 70)
