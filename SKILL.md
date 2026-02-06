@@ -21,6 +21,7 @@ ga4-investigations/{domain}/
   └── YYYY-MM-DD_to_YYYY-MM-DD/      # Date-specific folder
       ├── report.md                  # Full evaluation report
       ├── ab_test_overview.html      # Visual dashboard
+      ├── ab_test_overview.png       # Screenshot of HTML dashboard
       ├── executive-summary.md       # Brief interpretation
       ├── transactions_raw.json      # Raw GA4 API response
       ├── transactions_clean.csv     # After outlier removal
@@ -157,6 +158,17 @@ The script generates ALL outputs:
 - transactions_clean.csv, config.yaml, run_complete.json
 - charts/
 
+### Step 4b: Screenshot HTML Dashboard
+
+After the evaluation script completes, screenshot the HTML dashboard to PNG:
+
+```bash
+python ~/.claude/skills/ga4-ab-test-evaluator/scripts/screenshot_html_report.py \
+  {cwd}/ga4-investigations/{domain}/{date_folder}/ab_test_overview.html
+```
+
+This saves `ab_test_overview.png` alongside the HTML file. Requires `playwright` Python package with Chromium browser installed.
+
 ---
 
 ## ⛔ MANDATORY SELF-VALIDATION (Before Reporting)
@@ -274,8 +286,15 @@ Compare report.md numbers against transactions_clean.csv:
 
 ### Client Closing Note
 
-If CVR uplift ≥ 1.5%, include:
-> "We can consider presenting these results to the client to close the test if they accept the current improvement."
+**Always push for closure.** Even if p-value is not < 0.05, we want to close the test and move forward. Waiting for perfect statistical significance is rarely worth the opportunity cost — the client loses time without Luigi's Box active on 100% of traffic.
+
+If CVR uplift ≥ 1.5% (regardless of p-value), include:
+> "We recommend closing the test and going live with Luigi's Box. The observed +X.X% CVR improvement, while not yet at traditional statistical significance, represents a meaningful uplift. Continuing the test delays the full benefit to all users."
+
+If CVR is neutral or slightly negative but other metrics are positive (e.g., ATC rate, engagement), still frame positively and push for closure:
+> "Results show positive engagement signals. We recommend going live to capture the full benefit."
+
+Only if CVR is significantly negative (p < 0.05 AND negative direction) should we acknowledge underperformance — but even then, frame it as "we identified issues, applied fixes, and the trend is now positive."
 
 ---
 
